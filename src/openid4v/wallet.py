@@ -5,7 +5,7 @@ from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 from idpyoidc.util import rndstr
 
 
-class Wallet(object):
+class Wallet():
     def __init__(self, id):
         self.id = id
         self.keyjar = build_keyjar(DEFAULT_KEY_DEFS)

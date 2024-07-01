@@ -1,13 +1,11 @@
-from typing import Optional
-
 from idpyoidc.metadata import get_encryption_algs
 from idpyoidc.metadata import get_encryption_encs
 from idpyoidc.server import Endpoint
 from idpyoidc.server import EndpointContext
 from idpyoidc.server.claims import Claims
 
-from openid4v import message
 from openid4v import ServerEntity
+from openid4v import message
 
 
 class OpenidCredentialIssuerClaims(Claims):
@@ -43,13 +41,3 @@ class OpenidCredentialIssuer(ServerEntity):
     def get_metadata(self, *args):
         # static ! Should this be done dynamically ?
         return {self.name: self.context.provider_info}
-
-
-class AutomaticRegistration(object):
-
-    def __init__(self, upstream_get):
-        self.upstream_get = upstream_get
-
-    def set(self, client_id: str, client_info: Optional[dict] = None):
-        context = self.upstream_get("attribute", "context")
-        context.cdb[client_id] = client_info or {}
