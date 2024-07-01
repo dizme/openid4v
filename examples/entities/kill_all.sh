@@ -1,1 +1,0 @@
-./exec.py kill wp qeaa pid tmi issuer provider dc4eu

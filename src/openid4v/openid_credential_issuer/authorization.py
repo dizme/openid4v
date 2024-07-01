@@ -3,7 +3,6 @@ import logging
 
 from idpyoidc.message import oauth2
 from idpyoidc.server.oauth2 import authorization
-from idpyoidc.server.util import execute
 
 from openid4v.message import AuthorizationRequest
 
@@ -13,7 +12,7 @@ LOGGER = logging.getLogger(__name__)
 class Authorization(authorization.Authorization):
     """The service that talks to the credential issuers Authorization endpoint."""
 
-    request_cls = AuthorizationRequest
+    msg_type = AuthorizationRequest
     response_cls = oauth2.AuthorizationResponse
     error_msg = oauth2.AuthorizationErrorResponse
     service_name = "authorization"
@@ -34,12 +33,6 @@ class Authorization(authorization.Authorization):
 
     def __init__(self, upstream_get, conf=None, **kwargs):
         authorization.Authorization.__init__(self, upstream_get, conf=conf, **kwargs)
-
-        auto_req_conf = kwargs.get("automatic_registration")
-        if auto_req_conf:
-            self.automatic_registration = execute(auto_req_conf, upstream_get=self.upstream_get)
-        else:
-            self.automatic_registration = None
 
     def get_assertion_issuer_info(self, iss):
         pass
