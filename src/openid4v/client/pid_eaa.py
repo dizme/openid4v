@@ -17,10 +17,8 @@ from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.service import FederationService
 from fedservice.entity.utils import get_federation_entity
 from idpyoidc import metadata
-from idpyoidc import verified_claim_name
 from idpyoidc.client.client_auth import get_client_authn_methods
 from idpyoidc.client.configure import Configuration
-from idpyoidc.client.exception import ParameterError
 from idpyoidc.client.oauth2 import access_token
 from idpyoidc.client.oauth2.utils import get_state_parameter
 from idpyoidc.client.oauth2.utils import pre_construct_pick_redirect_uri
@@ -33,7 +31,6 @@ from idpyoidc.message.oauth2 import AuthorizationResponse
 from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.metadata import get_signing_algs
 from idpyoidc.server.oauth2 import pushed_authorization
-from idpyoidc.time_util import time_sans_frac
 
 from openid4v.message import AuthorizationRequest
 from openid4v.message import CredentialResponse
@@ -48,8 +45,8 @@ class Authorization(FederationService):
     error_msg = ResponseMessage
     synchronous = True
     service_name = "authorization"
-    http_method = "POST"
-    default_authn_method = "openid4v.client.client_authn.ClientAssertion"
+    http_method = "GET"
+    # default_authn_method = "openid4v.client.client_authn.ClientAssertion"
 
     _supports = {
         "claims_parameter_supported": True,
@@ -91,7 +88,7 @@ class Authorization(FederationService):
 
     def get_endpoint(self):
         # get endpoint from the Entity Configuration
-        chains, leaf_ec = collect_trust_chains(self, self.certificate_issuer_id)
+        chains, leaf_ec = collect_trust_chains(self, entity_id=self.certificate_issuer_id)
         if len(chains) == 0:
             return None
 
@@ -100,8 +97,8 @@ class Authorization(FederationService):
         if len(chains) == 0:
             return None
 
-        # pick one
-        return trust_chains[0].metadata['wallet_provider']["token_endpoint"]
+        # pick one. The authorization endpoint belongs to an OAuth2 server
+        return trust_chains[0].metadata['oauth_authorization_server']["authorization_endpoint"]
 
     def store_auth_request(self, request_args=None, **kwargs):
         """Store the authorization request in the state DB."""
@@ -114,7 +111,6 @@ class AccessToken(access_token.AccessToken):
     msg_type = oauth2.AccessTokenRequest
     response_cls = oauth2.AccessTokenResponse
     error_msg = oauth2.ResponseMessage
-    default_authn_method = "private_key_jwt"
     service_name = "accesstoken"
 
     _supports = {
@@ -126,6 +122,20 @@ class AccessToken(access_token.AccessToken):
     def __init__(self, upstream_get, conf: Optional[dict] = None, **kwargs):
         access_token.AccessToken.__init__(self, upstream_get, conf=conf, **kwargs)
 
+    def get_authn_method(self) -> str:
+        _methods = getattr(self, "client_authn_methods", None)
+        if not _methods:
+            _context = self.upstream_get("context")
+            _methods = list(_context.client_authn_methods.keys())
+
+        if len(_methods) >= 1:
+            if isinstance(_methods, dict):
+                return list(_methods.keys())[0]
+            else:
+                return _methods[0]
+
+        return self.default_authn_method
+
     def gather_verify_arguments(
             self, response: Optional[Union[dict, Message]] = None,
             behaviour_args: Optional[dict] = None
@@ -136,7 +146,7 @@ class AccessToken(access_token.AccessToken):
         :return: dictionary with arguments to the verify call
         """
         _context = self.upstream_get("context")
-        #_entity = self.upstream_get("entity")
+        # _entity = self.upstream_get("entity")
         _federation_entity = get_federation_entity(self)
 
         kwargs = {
@@ -169,32 +179,19 @@ class AccessToken(access_token.AccessToken):
 
     def update_service_context(self, resp, key: Optional[str] = "", **kwargs):
         _cstate = self.upstream_get("context").cstate
-        try:
-            _idt = resp[verified_claim_name("id_token")]
-        except KeyError:
-            pass
-        else:
-            try:
-                if _cstate.get_base_key(_idt["nonce"]) != key:
-                    raise ParameterError('Someone has messed with "nonce"')
-            except KeyError:
-                raise ValueError("Invalid nonce value")
-
-            _cstate.bind_key(_idt["sub"], key)
-
-        if "expires_in" in resp:
-            resp["__expires_at"] = time_sans_frac() + int(resp["expires_in"])
-
-        _cstate.update(key, resp)
+        _ava = {k: v for k, v in resp.items() if k in {"token_type", "access_token", "c_nonce",
+                                                       "c_nonce_expires_in"}}
+        _cstate.update(key, _ava)
 
 
 class PushedAuthorization(pushed_authorization.PushedAuthorization):
+    default_authn_method = "client_secret_basic"
 
     def __init__(self, upstream_get, **kwargs):
         pushed_authorization.PushedAuthorization.__init__(self, upstream_get, **kwargs)
 
 
-class Credential(FederationService):
+class Credential(Service):
     msg_type = CredentialsSupported
     # msg_type = Message
     response_cls = CredentialResponse
@@ -209,8 +206,24 @@ class Credential(FederationService):
     default_authn_method = "bearer_header"
 
     def __init__(self, upstream_get, conf=None):
-        FederationService.__init__(self, upstream_get, conf=conf)
+        Service.__init__(self, upstream_get, conf=conf)
         self.pre_construct.append(self.create_proof)
+        if conf:
+            self.certificate_issuer_id = conf.get("certificate_issuer_id")
+
+    def get_authn_method(self) -> str:
+        _methods = getattr(self, "client_authn_methods", None)
+        if not _methods:
+            _context = self.upstream_get("context")
+            _methods = list(_context.client_authn_methods.keys())
+
+        if len(_methods) >= 1:
+            if isinstance(_methods, dict):
+                return list(_methods.keys())[0]
+            else:
+                return _methods[0]
+
+        return self.default_authn_method
 
     def create_key_proof_JWT(self,
                              aud: Optional[str] = "",
@@ -265,3 +278,35 @@ class Credential(FederationService):
         # static for the time being
         request_args["proof"] = {"proof_type": "jwt", "jwt": self.create_key_proof_JWT(**kwargs)}
         return request_args, {}
+
+    def get_authn_method(self) -> str:
+        _methods = getattr(self, "client_authn_methods", None)
+        if not _methods:
+            _context = self.upstream_get("context")
+            _methods = list(_context.client_authn_methods.keys())
+
+        if len(_methods) >= 1:
+            if isinstance(_methods, dict):
+                return list(_methods.keys())[0]
+            else:
+                return _methods[0]
+
+        return self.default_authn_method
+
+    def get_endpoint(self):
+        _context = self.upstream_get("context")
+        if _context.issuer:
+            self.certificate_issuer_id = _context.issuer
+
+        # get endpoint from the Entity Configuration
+        chains, leaf_ec = collect_trust_chains(self, entity_id=self.certificate_issuer_id)
+        if len(chains) == 0:
+            return None
+
+        trust_chains = verify_trust_chains(self, chains, leaf_ec)
+        trust_chains = apply_policies(self, trust_chains)
+        if len(chains) == 0:
+            return None
+
+        # pick one. The authorization endpoint belongs to an OAuth2 server
+        return trust_chains[0].metadata['openid_credential_issuer']["credential_endpoint"]
