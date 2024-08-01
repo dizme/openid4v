@@ -18,7 +18,6 @@ from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message import OPTIONAL_MESSAGE
 from idpyoidc.message import REQUIRED_LIST_OF_STRINGS
 from idpyoidc.message import REQUIRED_MESSAGE
-from idpyoidc.message import SINGLE_OPTIONAL_ANY
 from idpyoidc.message import SINGLE_OPTIONAL_INT
 from idpyoidc.message import SINGLE_OPTIONAL_JSON
 from idpyoidc.message import SINGLE_OPTIONAL_STRING
@@ -28,11 +27,14 @@ from idpyoidc.message import SINGLE_REQUIRED_STRING
 from idpyoidc.message.oauth2 import deserialize_from_one_of
 from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.message.oidc import JsonWebToken
-from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 from idpyoidc.message.oidc import jwt_deser
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_BOOLEAN
+from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 from idpyoidc.message.oidc.identity_assurance import REQUIRED_VERIFIED_CLAIMS
 from idpysdjwt.holder import Holder
+
+from openid4v import extract_key_from_jws
+from openid4v import jws_issuer
 
 
 class ProofToken(JsonWebToken):
@@ -240,8 +242,11 @@ class CredentialDefinition(Message):
             self["credentialSubject"].verify(**kwargs)
 
 
-def cred_def_deser(val, sformat="dict"):
-    return deserialize_from_one_of(val, CredentialDefinition, sformat)
+def cred_def_deser(val, sformat="json"):
+    if sformat == "dict":
+        return deserialize_from_one_of(val, CredentialDefinition, "dict")
+    else:
+        return deserialize_from_one_of(val, CredentialDefinition, "json")
 
 
 SINGLE_REQUIRED_CREDENTIAL_DEFINITION = (
@@ -252,24 +257,47 @@ SINGLE_OPTIONAL_CREDENTIAL_DEFINITION = (
 )
 
 
+class CredentialResponseEncryption(Message):
+    c_param = {
+        "jwk": SINGLE_REQUIRED_STRING,
+        "alg": SINGLE_REQUIRED_STRING,
+        "enc": SINGLE_REQUIRED_STRING
+    }
+
+
 class CredentialRequest(Message):
     c_param = {
         "format": SINGLE_REQUIRED_STRING,
         "proof": SINGLE_OPTIONAL_PROOF,
-        "credential_encryption_jwk": SINGLE_OPTIONAL_JSON,
-        "credential_response_encryption_alg": SINGLE_OPTIONAL_STRING,
-        "credential_response_encryption_enc": SINGLE_OPTIONAL_STRING
-        # "doc_type": SINGLE_OPTIONAL_STRING,
-        # "claims": SINGLE_OPTIONAL_CLAIMS
+        "credential_response_encryption": SINGLE_OPTIONAL_JSON,
+        "credential_identifier": SINGLE_OPTIONAL_STRING
     }
 
     def verify(self, **kwargs):
         super().verify(**kwargs)
+        _cre_spec = self.get("credential_response_encryption", None)
+        if _cre_spec:
+            if isinstance(_cre_spec, str):
+                _cre = CredentialResponseEncryption(**json.loads(_cre_spec))
+            else:
+                _cre = CredentialResponseEncryption(**_cre_spec)
+            _cre.verify()
+            self["credential_response_encryption"] = _cre
+            self["_key"] = key_from_jwk_dict(_cre["jwk"])
+
         if "proof" in self:
-            self["proof"].verify(**kwargs)
-        if "credential_encryption_jwk" in self:
-            # Verify that it is a JWK
-            self["_key"] = key_from_jwk_dict(self["credential_encryption_jwk"])
+            _proof = self["proof"]
+            if "proof_type" not in _proof:
+                raise MissingAttribute("Missing proof_type in proof")
+            if _proof["proof_type"] == "jwt":
+                _jwt = _proof.get("jwt", None)
+                if not _jwt:
+                    raise MissingAttribute("Expected 'jwt' claim")
+                _keyjar = kwargs.get("keyjar")
+                _key = extract_key_from_jws(_jwt)
+                _iss = jws_issuer(_jwt)
+                _keyjar.add_keys(_iss, [_key])
+                _jwt_proof = JwtKeyProof().from_jwt(_jwt, _keyjar)
 
 
 class CredentialRequestJwtVcJson(CredentialRequest):
@@ -339,6 +367,10 @@ def auth_detail_list_deser(val, sformat="dict"):
     if isinstance(val, list):
         return [auth_detail_deser(v, sformat) for v in val]
     else:
+        if val.startswith("[") and val.endswith("]"):
+            val = val[2:-2].split(",")
+            return [auth_detail_deser(v, sformat) for v in val]
+
         return [auth_detail_deser(val, sformat)]
 
 
@@ -519,6 +551,7 @@ class CredentialDefinition(Message):
         "type": REQUIRED_LIST_OF_STRINGS
     }
 
+
 class CredentialResponse(ResponseMessage):
     c_param = {
         "format": SINGLE_REQUIRED_STRING,
@@ -538,6 +571,7 @@ class CredentialResponse(ResponseMessage):
             recv = Holder(key_jar=kwargs.get("keyjar"))
             _msg = recv.parse(self["credential"])
             self[verified_claim_name("credential")] = recv.payload
+
 
 class WalletProviderMetadata(Message):
     c_param = {
@@ -589,14 +623,12 @@ class WalletInstanceAttestationJWT(Message):
         "sub": SINGLE_REQUIRED_STRING,
         "iat": SINGLE_REQUIRED_INT,
         "exp": SINGLE_REQUIRED_INT,
-        "type": SINGLE_REQUIRED_STRING,
-        # "policy_uri": SINGLE_OPTIONAL_STRING,
-        # "tos_uri": SINGLE_OPTIONAL_STRING,
-        # "logo_uri": SINGLE_OPTIONAL_STRING,
-        "attested_security_context": SINGLE_OPTIONAL_STRING,
+        "aal": SINGLE_REQUIRED_STRING,
         "cnf": SINGLE_REQUIRED_JSON,
+        # "attested_security_context": SINGLE_OPTIONAL_STRING,
         # "authorization_endpoint": SINGLE_OPTIONAL_STRING,
         # "response_types_supported": OPTIONAL_LIST_OF_STRINGS,
+        # "response_modes_supported": OPTIONAL_LIST_OF_STRINGS,
         # "vp_formats_supported": SINGLE_REQUIRED_JSON,
         # "request_object_signing_alg_values_supported": REQUIRED_LIST_OF_STRINGS,
         # "presentation_definition_uri_supported": SINGLE_OPTIONAL_BOOLEAN
@@ -647,6 +679,7 @@ class PidEaaJWT(Message):
         "jti": SINGLE_REQUIRED_STRING,
         "status": SINGLE_OPTIONAL_STRING,
         "cnf": SINGLE_REQUIRED_JSON,
+        "vct": SINGLE_REQUIRED_STRING,
         "verified_claims": REQUIRED_VERIFIED_CLAIMS
     }
 
@@ -677,31 +710,10 @@ class JwtKeyJOSEHeader(Message):
     }
 
 
-class CredentialRequest(Message):
+class AppAttestationResponse(Message):
     c_param = {
-        "format": SINGLE_REQUIRED_STRING,
-        "proof": SINGLE_OPTIONAL_JSON,
-        "credential_encryption_jwk": SINGLE_OPTIONAL_JSON,
-        "credential_response_encryption_alg": SINGLE_OPTIONAL_STRING,
-        "credential_response_encryption_enc": SINGLE_OPTIONAL_STRING
+        "nonce": SINGLE_REQUIRED_STRING
     }
-
-    def verify(self, **kwargs):
-        if "credential_response_encryption_alg" in self:
-            if "credential_response_encryption_enc" not in self:
-                self["credential_response_encryption_enc"] = "A256GCM"
-        if "credential_response_encryption_enc" in self:
-            if "credential_response_encryption_alg" not in self:
-                raise MissingAttribute("Missing credential_response_encryption_alg specification")
-
-        if "proof" in self:
-            _proof = self["proof"]
-            if "proof_type" not in _proof:
-                raise MissingAttribute("Missing proof_type in proof")
-            if _proof["proof_type"] == "jwt":
-                if "jwt" not in _proof:
-                    raise MissingAttribute("Expected 'jwt' claim")
-                _jwt_proof = JwtKeyProof().from_jwt(_proof["jwt"], kwargs.get("keyjar"))
 
 
 MAP_TYP_MSG = {

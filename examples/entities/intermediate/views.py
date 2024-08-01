@@ -157,7 +157,7 @@ def handle_bad_request(e):
 
 @entity.route('/.well-known/openid-federation')
 def wkof():
-    _fe = current_app.server
+    _fe = current_app.federation_entity
     metadata = _fe.get_metadata()
     _ctx = _fe.context
     iss = sub = _ctx.entity_id

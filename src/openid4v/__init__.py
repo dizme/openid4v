@@ -1,5 +1,5 @@
 __author__ = "Roland Hedberg"
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 from typing import Any
 from typing import Callable
@@ -7,6 +7,8 @@ from typing import Optional
 from typing import Union
 
 from cryptojwt import KeyJar
+from cryptojwt.jwk.jwk import key_from_jwk_dict
+from cryptojwt.jws.jws import factory
 from fedservice.server import ServerUnit
 from idpyoidc.configure import Base
 from idpyoidc.server import ASConfiguration
@@ -14,10 +16,13 @@ from idpyoidc.server import authz
 from idpyoidc.server import build_endpoints
 from idpyoidc.server import Endpoint
 from idpyoidc.server import EndpointContext
-from idpyoidc.server.claims import Claims
+from idpyoidc.server.claims.oauth2 import Claims as OAUTH2_Claims
 from idpyoidc.server.client_authn import client_auth_setup
 from idpyoidc.server.endpoint_context import init_service
 from idpyoidc.server.user_authn.authn_context import populate_authn_broker
+
+
+ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-client-attestation"
 
 def do_endpoints(conf, upstream_get):
     _endpoints = conf.get("endpoint")
@@ -30,7 +35,7 @@ def do_endpoints(conf, upstream_get):
 class ServerEntity(ServerUnit):
     name = 'eudi_server'
     parameter = {"endpoint": [Endpoint], "context": EndpointContext}
-    claims_class = Claims
+    claims_class = OAUTH2_Claims
 
     def __init__(
             self,
@@ -59,6 +64,7 @@ class ServerEntity(ServerUnit):
         self.config = config
 
         self.endpoint = do_endpoints(config, self.unit_get)
+        server_type = config.get("server_type", config["conf"].get("server_type", ""))
 
         self.context = EndpointContext(
             conf=config,
@@ -66,7 +72,8 @@ class ServerEntity(ServerUnit):
             cwd=cwd,
             cookie_handler=cookie_handler,
             httpc=httpc,
-            claims_class=self.claims_class()
+            claims_class=self.claims_class(),
+            server_type=server_type
         )
 
         self.context.claims_interface = init_service(
@@ -92,7 +99,10 @@ class ServerEntity(ServerUnit):
 
     def get_metadata(self, *args):
         # static ! Should this be done dynamically ?
-        return {'openid_provider': self.context.provider_info}
+        if args:
+            return {args[0]: self.context.provider_info}
+        else:
+            return {'openid_provider': self.context.provider_info}
 
     def setup_authz(self):
         authz_spec = self.config.get("authz")
@@ -122,3 +132,18 @@ class ServerEntity(ServerUnit):
             self.unit_get, self.config.get("client_authn_methods")
         )
 
+def extract_key_from_jws(token):
+    # key can be in cnf:jwk in payload or jwk in header
+    _jws = factory(token)
+    _jwk = _jws.jwt.headers.get("jwk", None)
+    if _jwk is None:
+        _payload = _jws.jwt.payload()
+        _jwk = _payload['cnf'].get('jwk', None)
+    if _jwk:
+        return key_from_jwk_dict(_jwk)
+    else:
+        return None
+
+def jws_issuer(token):
+    _jws = factory(token)
+    return _jws.jwt.payload()["iss"]

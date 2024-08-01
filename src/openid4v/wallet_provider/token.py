@@ -1,5 +1,4 @@
 """Implements the service that talks to the Access Token endpoint."""
-import json
 import logging
 from typing import Optional
 from typing import Union
@@ -8,6 +7,7 @@ from urllib.parse import parse_qs
 from cryptojwt import JWT
 from cryptojwt.jwk.jwk import key_from_jwk_dict
 from cryptojwt.jws.jws import factory
+from fedservice.entity import get_verified_trust_chains
 from idpyoidc import verified_claim_name
 from idpyoidc.client.client_auth import get_client_authn_methods
 from idpyoidc.defaults import JWT_BEARER
@@ -21,6 +21,10 @@ from openid4v.message import WalletInstanceRequest
 from openid4v.message import WalletInstanceRequestJWT
 
 LOGGER = logging.getLogger(__name__)
+
+
+class InvalidNonce(ValueError):
+    pass
 
 
 class Token(Endpoint):
@@ -77,9 +81,23 @@ class Token(Endpoint):
         if isinstance(request, str):  # json
             request = {k: v[0] for k, v in parse_qs(request).items()}
 
-        request[verified_claim_name("assertion")] = self.verify_self_signed_signature(
-            request["assertion"])
+        _ver_request = self.verify_self_signed_signature(request["assertion"])
+        request[verified_claim_name("assertion")] = _ver_request
 
+        if 'nonce' in _ver_request:
+            # Find the AppAttestation endpoint in the same server
+            app_attestation = self.upstream_get("unit").get_endpoint("app_attestation")
+            if app_attestation:
+                _nonce = _ver_request.get("nonce", None)
+                if _nonce:
+                    if _nonce != "__ignore__":
+                        iccid = app_attestation.attestation_service.verify_nonce(_ver_request["nonce"])
+
+                        if not iccid:
+                            raise InvalidNonce("Nonce invalid")
+                        request["__iccid"] = iccid
+                else:
+                    raise ValueError("Missing 'nonce'")
         return request
 
     def process_request(self, request: Optional[Union[Message, dict]] = None, **kwargs):
@@ -102,15 +120,23 @@ class Token(Endpoint):
             "attested_security_context": "https://wallet-provider.example.org/LoA/basic",
             "type": "WalletInstanceAttestation",
         }
+        payload.update(self.upstream_get("unit").wallet_instance_discovery(req_args['iss']))
+
         keyjar = self.upstream_get("attribute", "keyjar")
         entity_id = self.upstream_get("attribute", "entity_id")
-        _signer = JWT(key_jar=keyjar, sign_alg='ES256', iss=entity_id, lifetime=300)
+        sign_alg = kwargs.get("sign_alg", "ES256")
+        lifetime = kwargs.get("lifetime", 86400)
+        _signer = JWT(key_jar=keyjar, sign_alg=sign_alg, iss=entity_id, lifetime=lifetime)
         _signer.with_jti = True
 
         _jws_header = {"typ": "wallet-attestation+jwt"}
         _trust_chain = kwargs.get("trust_chain")
         if _trust_chain:
             _jws_header["trust_chain"] = _trust_chain
+        else: # Collect Trust Chain
+            _trust_chains = get_verified_trust_chains(self, entity_id=entity_id)
+            if len(_trust_chains) >= 1:
+                _jws_header["trust_chain"] = _trust_chains[0].chain
 
         _wallet_instance_attestation = _signer.pack(payload,
                                                     aud=req_args['iss'],
@@ -127,7 +153,8 @@ class Token(Endpoint):
 
         _headers = [("Content-type", "application/json")]
         # resp = {"response": json.dumps(response_args), "http_headers": _headers}
-        return response_args
+        LOGGER.debug(f"Process request returned: {response_args}")
+        return {"response_args": response_args}
 
     def supports(self):
         return {"grant_types_supported": self._include["grant_types_supported"]}
