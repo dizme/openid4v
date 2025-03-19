@@ -29,6 +29,8 @@ import base64
 import cbor2
 from pycose.messages import Sign1Message
 from pycose.keys import CoseKey
+from authlib.jose import JsonWebEncryption
+from authlib.jose import JsonWebKey
 
 
 logger = logging.getLogger(__name__)
@@ -534,12 +536,12 @@ class Credential(Endpoint):
         credential_response = {}
         credentials = []
 
-        if "credential_responses" in _msg:
-            credential_response.update({"credentials": _msg})
+        if "credentials" in _msg:
+            credential_response = _msg
             # if len(_msg["credential_responses"]) == 1:
             # _msg = _msg["credential_responses"][0]
 
-        if "credential" in _msg or "credential_responses" in _msg:
+        if "credential" in _msg or "credentials" in _msg:
 
             notification_id = rndstr()
             # transaction_id = rndstr()
@@ -809,6 +811,44 @@ class Credential(Endpoint):
             } """
 
         _resp = self.credentialReq(request, client_id)
+
+        if "credential_response_encryption" in request:
+            if (
+                "jwk" not in request["credential_response_encryption"]
+                or "alg" not in request["credential_response_encryption"]
+                or "enc" not in request["credential_response_encryption"]
+            ):
+                return {
+                    "response_args": {
+                        "error": "invalid_credential_response_encryption",
+                        "error_description": "Missing fields",
+                    },
+                    "client_id": client_id,
+                }
+            else:
+                protected_header = {
+                    "alg": request["credential_response_encryption"]["alg"],
+                    "enc": request["credential_response_encryption"]["enc"],
+                }
+
+                try:
+                    public_key = JsonWebKey.import_key(
+                        request["credential_response_encryption"]["jwk"]
+                    )
+                    jwe = JsonWebEncryption()
+                    jwe_token = jwe.serialize_compact(
+                        protected_header, json.dumps(_resp), public_key
+                    )
+                except:
+                    return {
+                        "response_args": {
+                            "error": "invalid_credential_response_encryption",
+                            "error_description": "JWK not valid",
+                        },
+                        "client_id": client_id,
+                    }
+
+                return {"encrypted_response": jwe_token, "client_id": client_id}
 
         # credentials, client_id = self.credentialReq(request)
 
