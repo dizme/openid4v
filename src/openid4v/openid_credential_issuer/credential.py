@@ -717,7 +717,10 @@ class Credential(Endpoint):
         # credentials, client_id = self.credentialReq(request)
 
         if "transaction_id" in request:
-            _session_info["grant"].add_transaction(request["transaction_id"], _resp)
+            _session_info["grant"].add_transaction(
+                request["transaction_id"],
+                {"response_args": _resp, "client_id": client_id},
+            )
 
         return {"response_args": _resp, "client_id": client_id}
 
