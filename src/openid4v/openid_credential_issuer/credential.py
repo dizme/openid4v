@@ -336,8 +336,6 @@ class Credential(Endpoint):
                 token, public_key, algorithms=[alg], audience=aud
             )
 
-            print("Decoded JWT:", decoded_token)
-
         except jwt.ExpiredSignatureError:
             print("Token has expired")
         except jwt.InvalidTokenError as e:
@@ -523,8 +521,6 @@ class Credential(Endpoint):
             "user_id": user_id,
         }
 
-        print("\ncredential data: ", data)
-
         json_data = json.dumps(data)
         headers = {"Content-Type": "application/json"}
         _msg = requests.post(redirect_uri, data=json_data, headers=headers).json()
@@ -612,8 +608,6 @@ class Credential(Endpoint):
                 },
                 "client_id": client_id,
             }
-
-        print("\nRequest: ", request)
 
         if "credential_indentifier" in request:
             return {

@@ -32,20 +32,14 @@ class Nonce(UserInfo):
             "aud": request["aud"],
         }
 
-        print("\nPayload: ", payload)
-
         jwe = JsonWebEncryption()
 
         payload_json = json.dumps(payload)
 
         encrypted_jwt = jwe.serialize_compact(protected, payload_json, key)
 
-        print("\nEncrypted: ", encrypted_jwt.decode("utf-8"))
-
         data = jwe.deserialize_compact(encrypted_jwt, key)
         jwe_payload = data["payload"]
-
-        print("\nDecrypted: ", jwe_payload)
 
         response = {"c_nonce": encrypted_jwt.decode("utf-8")}
 
