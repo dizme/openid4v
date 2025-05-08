@@ -192,6 +192,7 @@ class Credential(Endpoint):
     endpoint_name = "credential_endpoint"
     name = "credential"
     endpoint_type = "oauth2"
+    deferred_requests = {}
 
     _supports = {
         "credentials_supported": None,
@@ -434,18 +435,7 @@ class Credential(Endpoint):
 
         return device_key
 
-    def credentialReq(self, request, client_id):
-        try:
-            _mngr = self.upstream_get("context").session_manager
-            _session_info = _mngr.get_session_info_by_token(
-                request["access_token"], grant=True, handler_key="access_token"
-            )
-        except (KeyError, ValueError):
-            _resp = {
-                "error": "invalid_token",
-                "error_description": "Invalid Token",
-            }
-            return _resp
+    def credentialReq(self, request, client_id, _session_info):
 
         formatter_request = {}
 
@@ -537,7 +527,35 @@ class Credential(Endpoint):
             # if len(_msg["credential_responses"]) == 1:
             # _msg = _msg["credential_responses"][0]
 
-        if "credential" in _msg or "credentials" in _msg:
+        if "error" in credential_response and credential_response["error"] == "Pending":
+            transaction_id = rndstr()
+            _session_info["grant"].add_transaction(transaction_id, None)
+            credential_response.update({"transaction_id": transaction_id})
+            credential_response.pop("error")
+
+            # self.deferred_requests.append({transaction_id:{"request":request,"count":10}})
+            self.deferred_requests.update(
+                {transaction_id: {"request": request, "count": 10}}
+            )
+
+        elif (
+            "credential_configuration_id" in data["credential_requests"]
+            and data["credential_requests"]["credential_configuration_id"]
+            == "eu.europa.ec.eudi.pseudonym_over18_mdoc_deferred_endpoint"
+            and "transaction_id" not in request
+        ):
+            transaction_id = rndstr()
+            _session_info["grant"].add_transaction(transaction_id, None)
+            credential_response = {
+                "transaction_id": transaction_id,
+            }
+            # self.deferred_requests.append({"transaction_id":transaction_id,"request":request,"count":10})
+            self.deferred_requests.update(
+                {transaction_id: {"request": request, "count": 10}}
+            )
+            request["pseudonym_deferred"] = True
+
+        elif "credential" in _msg or "credentials" in _msg:
 
             notification_id = rndstr()
             # transaction_id = rndstr()
@@ -547,43 +565,12 @@ class Credential(Endpoint):
             credential_response.update({"notification_id": notification_id})
             # _msg.update({"transaction_id": transaction_id})
 
-            if (
-                "credential_configuration_id" in data["credential_requests"]
-                and data["credential_requests"]["credential_configuration_id"]
-                == "eu.europa.ec.eudi.pseudonym_over18_mdoc_deferred_endpoint"
-                and "transaction_id" not in request
-            ):
-                transaction_id = rndstr()
-                _session_info["grant"].add_transaction(transaction_id, None)
-                credential_response = {
-                    "transaction_id": transaction_id,
-                }
-
-            if "transaction_id" in request:
-                _session_info["grant"].add_transaction(
-                    request["transaction_id"], credential_response
-                )
-
         else:
-            if "transaction_id" in request:
-                credential_response.update(
-                    {"transaction_id": request["transaction_id"]}
-                )
-
-            elif (
-                "error" in credential_response
-                and credential_response["error"] == "Pending"
-            ):
-                transaction_id = rndstr()
-                _session_info["grant"].add_transaction(transaction_id, None)
-                credential_response.update({"transaction_id": transaction_id})
-                credential_response.pop("error")
-            else:
-                _resp = {
-                    "error": "invalid_credential_request",
-                    "error_description": "Couldn't generate credential",
-                }
-                return _resp
+            _resp = {
+                "error": "invalid_credential_request",
+                "error_description": "Couldn't generate credential",
+            }
+            return _resp
 
         return credential_response
 
@@ -661,150 +648,21 @@ class Credential(Endpoint):
                     "client_id": client_id,
                 }
 
-        """ if "format" in request and not ("vct" in request or "doctype" in request):
-            return {
-                "response_args": {
-                    "c_nonce": rndstr(),
-                    "c_nonce_expires_in": 86400,
-                    "error": "invalid_credential_request",
-                    "error_description": "Missing doctype or vct",
-                },
-                "client_id": client_id,
-            } """
-
-        """ if "credential_requests" in request:
-            for credential in request["credential_requests"]:
-                if "proof" not in credential:
-                    return {
-                        "response_args": {
-                            "c_nonce": rndstr(),
-                            "c_nonce_expires_in": 86400,
-                            "error": "invalid_proof",
-                            "error_description": "Credential Issuer requires proof.",
-                        },
-                        "client_id": client_id,
-                    }
-
-                elif "proof" in credential:
-                    if "proof_type" not in credential["proof"]:
-                        return {
-                            "response_args": {
-                                "c_nonce": rndstr(),
-                                "c_nonce_expires_in": 86400,
-                                "error": "invalid_proof",
-                                "error_description": "Credential Issuer requires proof.",
-                            },
-                            "client_id": client_id,
-                        }
-                    if (
-                        credential["proof"]["proof_type"] == "jwt"
-                        and "jwt" not in credential["proof"]
-                    ):
-                        return {
-                            "response_args": {
-                                "c_nonce": rndstr(),
-                                "c_nonce_expires_in": 86400,
-                                "error": "invalid_proof",
-                                "error_description": "Missing jwt field",
-                            },
-                            "client_id": client_id,
-                        }
-                    if (
-                        credential["proof"]["proof_type"] == "cwt"
-                        and "cwt" not in credential["proof"]
-                    ):
-                        return {
-                            "response_args": {
-                                "c_nonce": rndstr(),
-                                "c_nonce_expires_in": 86400,
-                                "error": "invalid_proof",
-                                "error_description": "Missing cwt field",
-                            },
-                            "client_id": client_id,
-                        }
-
-                if "oidc_config" not in request:
-                    return {
-                        "response_args": {
-                            "c_nonce": rndstr(),
-                            "c_nonce_expires_in": 86400,
-                            "error": "invalid_credential_request",
-                            "error_description": "Internal missing oidc config",
-                        },
-                        "client_id": client_id,
-                    } """
-
-        """ req = request
-
-        if (
-            "credential_requests" not in request
-            and "format" in request
-            and "doctype" in request
-            and "proof" in request
-        ):
-            credential_json = {
-                "format": request["format"],
-                "doctype": request["doctype"],
-                "proof": request["proof"],
+        try:
+            _mngr = self.upstream_get("context").session_manager
+            _session_info = _mngr.get_session_info_by_token(
+                request["access_token"], grant=True, handler_key="access_token"
+            )
+        except (KeyError, ValueError):
+            _resp = {
+                "error": "invalid_token",
+                "error_description": "Invalid Token",
             }
+            return _resp
 
-            req = {"credential_requests": [credential_json]}
-            request.pop("format")
-            request.pop("doctype")
-            request.pop("proof")
+        _resp = self.credentialReq(request, client_id, _session_info)
 
-            request.update(req)
-
-        elif (
-            "credential_requests" not in request
-            and "format" in request
-            and "vct" in request
-            and "proof" in request
-        ):
-            credential_json = {
-                "format": request["format"],
-                "vct": request["vct"],
-                "proof": request["proof"],
-            }
-
-            req = {"credential_requests": [credential_json]}
-            request.pop("format")
-            request.pop("vct")
-            request.pop("proof")
-
-            request.update(req)
-
-        elif (
-            "credential_requests" not in request
-            and "format" not in request
-            and "credential_identifier" in request
-            and "proof" in request
-        ):
-            credential_json = {
-                "format": request["format"],
-                "credential_identifier": request["credential_identifier"],
-                "proof": request["proof"],
-            }
-
-            req = {"credential_requests": [credential_json]}
-            request.pop("format")
-            request.pop("credential_identifier")
-            request.pop("proof")
-
-            request.update(req)
-
-        elif "credential_requests" not in request:
-            return {
-                "response_args": {
-                    "c_nonce": rndstr(),
-                    "c_nonce_expires_in": 86400,
-                    "error": "invalid_credential_request",
-                    "error_description": "Missing or mismatched data",
-                },
-                "client_id": client_id,
-            } """
-
-        _resp = self.credentialReq(request, client_id)
+        print("Response: ", _resp)
 
         if "credential_response_encryption" in request:
             if (
@@ -842,10 +700,37 @@ class Credential(Endpoint):
                         "client_id": client_id,
                     }
 
-                return {"encrypted_response": jwe_token, "client_id": client_id}
+                if "transaction_id" in _resp:
+                    return {
+                        "encrypted_response": jwe_token,
+                        "client_id": client_id,
+                        "transaction_id": _resp["transaction_id"],
+                    }
+                else:
+                    if "transaction_id" in request:
+                        _session_info["grant"].add_transaction(
+                            request["transaction_id"],
+                            {"encrypted_response": jwe_token, "client_id": client_id},
+                        )
+                    return {"encrypted_response": jwe_token, "client_id": client_id}
 
         # credentials, client_id = self.credentialReq(request)
 
-        logger.info("Response: ", _resp)
+        if "transaction_id" in request:
+            _session_info["grant"].add_transaction(request["transaction_id"], _resp)
 
         return {"response_args": _resp, "client_id": client_id}
+
+    def process_deferred(self):
+        for transaction_id in list(self.deferred_requests):
+            self.deferred_requests[transaction_id]["request"][
+                "transaction_id"
+            ] = transaction_id
+            request = self.deferred_requests[transaction_id]["request"]
+            count = self.deferred_requests[transaction_id]["count"]
+            if count == 0:
+                del self.deferred_requests[transaction_id]
+                continue
+            else:
+                _resp = self.process_request(request)
+                self.deferred_requests[transaction_id]["count"] -= 1
