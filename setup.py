@@ -22,16 +22,17 @@ from setuptools import find_packages
 from setuptools import setup
 from setuptools.command.test import test as TestCommand
 
-__author__ = 'Roland Hedberg'
+__author__ = "Roland Hedberg"
 
 
 extra_install_requires = []
 
-with open('src/openid4v/__init__.py', 'r') as fd:
-    version = re.search(r'^__version__\s*=\s*[\'"]([^\'"]*)[\'"]',
-                        fd.read(), re.MULTILINE).group(1)
+with open("src/openid4v/__init__.py", "r") as fd:
+    version = re.search(
+        r'^__version__\s*=\s*[\'"]([^\'"]*)[\'"]', fd.read(), re.MULTILINE
+    ).group(1)
 
-with open(os.path.join(os.path.dirname(__file__), 'README.md')) as readme:
+with open(os.path.join(os.path.dirname(__file__), "README.md")) as readme:
     README = readme.read()
 
 setup(
@@ -39,11 +40,11 @@ setup(
     version=version,
     description="Python implementation of OpenID Verifiable Credentials Issuer, Wallet and Wallet Provider",
     long_description=README,
-    long_description_content_type='text/markdown',
+    long_description_content_type="text/markdown",
     author="Roland Hedberg",
     author_email="roland@catalogix.se",
     license="Apache 2.0",
-    url='https://github.com/rohe/openid4v/',
+    url="https://github.com/rohe/openid4v/",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[
@@ -52,9 +53,8 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
-        "Topic :: Software Development :: Libraries :: Python Modules"],
-    install_requires=[
-        "idpyoidc>=4.0.0"
+        "Topic :: Software Development :: Libraries :: Python Modules",
     ],
+    install_requires=["idpyoidc>=4.0.0", "Authlib>=1.5.1"],
     zip_safe=False,
 )
