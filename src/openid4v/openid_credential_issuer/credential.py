@@ -527,12 +527,10 @@ class Credential(Endpoint):
             # if len(_msg["credential_responses"]) == 1:
             # _msg = _msg["credential_responses"][0]
 
-        if "error" in credential_response and credential_response["error"] == "Pending":
+        if "error" in _msg and _msg["error"] == "Pending":
             transaction_id = rndstr()
             _session_info["grant"].add_transaction(transaction_id, None)
             credential_response.update({"transaction_id": transaction_id})
-            credential_response.pop("error")
-
             # self.deferred_requests.append({transaction_id:{"request":request,"count":10}})
             self.deferred_requests.update(
                 {transaction_id: {"request": request, "count": 10}}
