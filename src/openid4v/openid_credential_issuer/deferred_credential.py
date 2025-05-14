@@ -92,12 +92,9 @@ class Deferred_Credential(UserInfo):
 
         if _session_info["grant"].transaction_ids[transaction_id]:
             _resp = _session_info["grant"].transaction_ids[transaction_id]
-
             _session_info["grant"].transaction_ids.pop(transaction_id)
+            return _resp
+
         else:
             _resp = {"error": "issuance_pending", "interval": 30}
             return {"response_args": _resp, "client_id": client_id}
-
-        return {"response_args": _resp, "client_id": client_id}
-
-        # return make_response("", 204)

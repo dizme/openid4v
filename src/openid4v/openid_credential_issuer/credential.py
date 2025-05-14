@@ -21,12 +21,16 @@ from openid4v.message import CredentialResponse
 
 import json
 import jwt
+from jwt.algorithms import get_default_algorithms
+
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 import base64
 import cbor2
 from pycose.messages import Sign1Message
 from pycose.keys import CoseKey
+from authlib.jose import JsonWebEncryption
+from authlib.jose import JsonWebKey
 
 
 logger = logging.getLogger(__name__)
@@ -188,6 +192,7 @@ class Credential(Endpoint):
     endpoint_name = "credential_endpoint"
     name = "credential"
     endpoint_type = "oauth2"
+    deferred_requests = {}
 
     _supports = {
         "credentials_supported": None,
@@ -310,6 +315,33 @@ class Credential(Endpoint):
             #     pass
         return True, _session_info["client_id"]
 
+    def verify_jwt_proof(token, aud):
+        headers = jwt.get_unverified_header(token)
+
+        if "alg" not in headers:
+            raise ValueError("No algorithm (alg) specified in token header")
+
+        alg = headers["alg"]
+
+        if "jwk" in headers:
+            algorithms = get_default_algorithms()
+            if alg not in algorithms:
+                raise ValueError(f"Algorithm {alg} not supported")
+
+            public_key = algorithms[alg].from_jwk(headers["jwk"])
+        else:
+            raise ValueError("No public key (jwk) found in token header")
+
+        try:
+            decoded_token = jwt.decode(
+                token, public_key, algorithms=[alg], audience=aud
+            )
+
+        except jwt.ExpiredSignatureError:
+            print("Token has expired")
+        except jwt.InvalidTokenError as e:
+            print("Invalid token", str(e))
+
     # gets the public key from a JWK
     def pKfromJWK(self, jwt_encoded):
         jwt_decoded = jwt.get_unverified_header(jwt_encoded)
@@ -319,8 +351,6 @@ class Credential(Endpoint):
             _resp = {
                 "error": "invalid_proof",
                 "error_description": "Credential Issuer only supports P-256 curves",
-                "c_nonce": rndstr(),
-                "c_nonce_expires_in": 86400,
             }
             return _resp  # {"response_args": _resp, "client_id": client_id}
 
@@ -405,22 +435,51 @@ class Credential(Endpoint):
 
         return device_key
 
-    def credentialReq(self, request, client_id):
-        try:
-            _mngr = self.upstream_get("context").session_manager
-            _session_info = _mngr.get_session_info_by_token(
-                request["access_token"], grant=True, handler_key="access_token"
-            )
-        except (KeyError, ValueError):
-            _resp = {
-                "error": "invalid_token",
-                "error_description": "Invalid Token",
-                "c_nonce": rndstr(),
-                "c_nonce_expires_in": 86400,
-            }
-            return _resp
+    def credentialReq(self, request, client_id, _session_info):
 
-        for credential in request["credential_requests"]:
+        formatter_request = {}
+
+        formatter_request.update(
+            {"credential_configuration_id": request["credential_configuration_id"]}
+        )
+
+        if "proof" in request and request["proof"]["proof_type"] == "jwt":
+            try:
+                jwt_encoded = request["proof"]["jwt"]
+                device_key = self.pKfromJWK(jwt_encoded)
+                formatter_request.update({"proofs": [{"jwt": device_key}]})
+                if "error" in device_key:
+                    return device_key, client_id
+            except Exception as e:
+                _resp = {
+                    "error": "invalid_proof",
+                    "error_description": str(e),
+                }
+                return _resp
+
+        if "proofs" in request:
+            for alg, key_list in request["proofs"].items():
+                if alg != "jwt":
+                    return {"error": "proof currently not supported"}, client_id
+                else:
+                    pubKeys = []
+                    for jwt_ in key_list:
+                        try:
+                            device_key = self.pKfromJWK(jwt_)
+                            if "error" in device_key:
+                                return device_key, client_id
+
+                            pubKeys.append({alg: device_key})
+                        except Exception as e:
+                            _resp = {
+                                "error": "invalid_proof",
+                                "error_description": str(e),
+                            }
+                            return _resp
+
+            formatter_request.update({"proofs": pubKeys})
+
+        """ for credential in request["credential_requests"]:
             if "jwt" in credential["proof"]:
                 jwt_encoded = credential["proof"]["jwt"]
                 device_key = self.pKfromJWK(jwt_encoded)
@@ -432,15 +491,13 @@ class Credential(Endpoint):
                     _resp = {
                         "error": "invalid_proof",
                         "error_description": str(e),
-                        "c_nonce": rndstr(),
-                        "c_nonce_expires_in": 86400,
                     }
-                    return _resp
+                    return _resp 
 
-            if "error" in device_key:
-                return device_key, client_id
+        
+            
             credential["device_publickey"] = device_key
-            credential.pop("proof")
+            credential.pop("proof")"""
 
         user_id = _session_info["user_id"]
 
@@ -450,7 +507,7 @@ class Credential(Endpoint):
         redirect_uri = request["oidc_config"].credential_urls["dynamic"]
 
         data = {
-            "credential_requests": request["credential_requests"],
+            "credential_requests": formatter_request,
             "user_id": user_id,
         }
 
@@ -462,62 +519,58 @@ class Credential(Endpoint):
         for credential in _msg:
             credentials["credential_responses"].append({credential: _msg[credential]}) """
 
-        if "credential_responses" in _msg:
-            if len(_msg["credential_responses"]) == 1:
-                _msg = _msg["credential_responses"][0]
+        credential_response = {}
+        credentials = []
 
-        _nonce = {
-            "c_nonce": rndstr(),
-            "c_nonce_expires_in": 86400,
-        }
+        if "credentials" in _msg:
+            credential_response = _msg
+            # if len(_msg["credential_responses"]) == 1:
+            # _msg = _msg["credential_responses"][0]
 
-        _msg.update(_nonce)
+        if "error" in _msg and _msg["error"] == "Pending":
+            transaction_id = rndstr()
+            _session_info["grant"].add_transaction(transaction_id, None)
+            credential_response.update({"transaction_id": transaction_id})
+            # self.deferred_requests.append({transaction_id:{"request":request,"count":10}})
+            self.deferred_requests.update(
+                {transaction_id: {"request": request, "count": 10}}
+            )
 
-        if "credential" in _msg or "credential_responses" in _msg:
+        elif (
+            "credential_configuration_id" in data["credential_requests"]
+            and data["credential_requests"]["credential_configuration_id"]
+            == "eu.europa.ec.eudi.pseudonym_over18_mdoc_deferred_endpoint"
+            and "transaction_id" not in request
+        ):
+            transaction_id = rndstr()
+            _session_info["grant"].add_transaction(transaction_id, None)
+            credential_response = {
+                "transaction_id": transaction_id,
+            }
+            # self.deferred_requests.append({"transaction_id":transaction_id,"request":request,"count":10})
+            self.deferred_requests.update(
+                {transaction_id: {"request": request, "count": 10}}
+            )
+            request["pseudonym_deferred"] = True
+
+        elif "credential" in _msg or "credentials" in _msg:
 
             notification_id = rndstr()
             # transaction_id = rndstr()
             _session_info["grant"].add_notification(notification_id)
             # _session_info["grant"].add_transaction(transaction_id)
 
-            _msg.update({"notification_id": notification_id})
+            credential_response.update({"notification_id": notification_id})
             # _msg.update({"transaction_id": transaction_id})
 
-            if "doctype" in data["credential_requests"][0]:
-                if (
-                    data["credential_requests"][0]["doctype"]
-                    == "eu.europa.ec.eudi.pseudonym.age_over_18.deferred_endpoint"
-                    and "transaction_id" not in request
-                ):
-                    transaction_id = rndstr()
-                    _session_info["grant"].add_transaction(transaction_id, None)
-                    _msg = {
-                        "transaction_id": transaction_id,
-                        "c_nonce": rndstr(),
-                        "c_nonce_expires_in": 86400,
-                    }
-
-            if "transaction_id" in request:
-                _session_info["grant"].add_transaction(request["transaction_id"], _msg)
-
         else:
-            if "transaction_id" in request:
-                _msg.update({"transaction_id": request["transaction_id"]})
-            elif "error" in _msg and _msg["error"] == "Pending":
-                transaction_id = rndstr()
-                _session_info["grant"].add_transaction(transaction_id, None)
-                _msg.update({"transaction_id": transaction_id})
-                _msg.pop("error")
-            else:
-                _resp = {
-                    "error": "invalid_credential_request",
-                    "error_description": "Couldn't generate credential",
-                    "c_nonce": rndstr(),
-                    "c_nonce_expires_in": 86400,
-                }
-                return _resp
+            _resp = {
+                "error": "invalid_credential_request",
+                "error_description": "Couldn't generate credential",
+            }
+            return _resp
 
-        return _msg
+        return credential_response
 
     def process_request(self, request=None, **kwargs):
         # _msg = self.credential_constructor(
@@ -535,229 +588,150 @@ class Credential(Endpoint):
         if not allowed:
             return {
                 "response_args": {
-                    "c_nonce": rndstr(),
-                    "c_nonce_expires_in": 86400,
                     "error": "invalid_token",
                     "error_description": "Access not granted",
                 },
                 "client_id": client_id,
             }
 
-        if "format" in request and not ("vct" in request or "doctype" in request):
+        if "credential_indentifier" in request:
             return {
                 "response_args": {
-                    "c_nonce": rndstr(),
-                    "c_nonce_expires_in": 86400,
                     "error": "invalid_credential_request",
-                    "error_description": "Missing doctype or vct",
+                    "error_description": "credential_identifier currently not supported",
                 },
                 "client_id": client_id,
             }
 
-        if "credential_requests" in request:
-            for credential in request["credential_requests"]:
-                if "proof" not in credential:
-                    return {
-                        "response_args": {
-                            "c_nonce": rndstr(),
-                            "c_nonce_expires_in": 86400,
-                            "error": "invalid_proof",
-                            "error_description": "Credential Issuer requires key proof to be bound to a Credential Issuer provided nonce.",
-                        },
-                        "client_id": client_id,
-                    }
-
-                elif "proof" in credential:
-                    if "proof_type" not in credential["proof"]:
-                        return {
-                            "response_args": {
-                                "c_nonce": rndstr(),
-                                "c_nonce_expires_in": 86400,
-                                "error": "invalid_proof",
-                                "error_description": "Credential Issuer requires key proof to be bound to a Credential Issuer provided nonce.",
-                            },
-                            "client_id": client_id,
-                        }
-                    """ if "jwt" not in credential["proof"]:
-                        return {
-                            "response_args": {
-                                "c_nonce": rndstr(),
-                                "c_nonce_expires_in": 86400,
-                                "error": "invalid_proof",
-                                "error_description": "Only JWT and CWT supported at this time",
-                            },
-                            "client_id": client_id,
-                        } """
-                    if (
-                        credential["proof"]["proof_type"] == "jwt"
-                        and "jwt" not in credential["proof"]
-                    ):
-                        return {
-                            "response_args": {
-                                "c_nonce": rndstr(),
-                                "c_nonce_expires_in": 86400,
-                                "error": "invalid_proof",
-                                "error_description": "Missing jwt field",
-                            },
-                            "client_id": client_id,
-                        }
-                    if (
-                        credential["proof"]["proof_type"] == "cwt"
-                        and "cwt" not in credential["proof"]
-                    ):
-                        return {
-                            "response_args": {
-                                "c_nonce": rndstr(),
-                                "c_nonce_expires_in": 86400,
-                                "error": "invalid_proof",
-                                "error_description": "Missing cwt field",
-                            },
-                            "client_id": client_id,
-                        }
-
-                if "oidc_config" not in request:
-                    return {
-                        "response_args": {
-                            "c_nonce": rndstr(),
-                            "c_nonce_expires_in": 86400,
-                            "error": "invalid_credential_request",
-                            "error_description": "Internal missing oidc config",
-                        },
-                        "client_id": client_id,
-                    }
-
-        elif "proof" not in request:
+        if (
+            "credential_identifier" not in request
+            and "credential_configuration_id" not in request
+        ):
             return {
                 "response_args": {
-                    "c_nonce": rndstr(),
-                    "c_nonce_expires_in": 86400,
-                    "error": "invalid_proof",
-                    "error_description": "Credential Issuer requires key proof to be bound to a Credential Issuer provided nonce.",
+                    "error": "invalid_credential_request",
+                    "error_description": "Missing credential_identifier or credential_configuration_id",
                 },
                 "client_id": client_id,
             }
+
+        if "proof" not in request and "proofs" not in request:
+            return {
+                "response_args": {
+                    "error": "invalid_proof",
+                    "error_description": "Credential Issuer requires key proof.",
+                },
+                "client_id": client_id,
+            }
+
         elif "proof" in request:
             if "proof_type" not in request["proof"]:
                 return {
                     "response_args": {
-                        "c_nonce": rndstr(),
-                        "c_nonce_expires_in": 86400,
                         "error": "invalid_proof",
-                        "error_description": "Credential Issuer requires key proof to be bound to a Credential Issuer provided nonce.",
+                        "error_description": "Credential Issuer requires key proof.",
                     },
                     "client_id": client_id,
                 }
-            """ if "jwt" not in request["proof"]:
-                return {
-                    "response_args": {
-                        "c_nonce": rndstr(),
-                        "c_nonce_expires_in": 86400,
-                        "error": "invalid_proof",
-                        "error_description": "Only JWT and CWT supported at this time",
-                    },
-                    "client_id": client_id,
-                } """
+
             if (
                 request["proof"]["proof_type"] == "jwt"
                 and "jwt" not in request["proof"]
             ):
                 return {
                     "response_args": {
-                        "c_nonce": rndstr(),
-                        "c_nonce_expires_in": 86400,
                         "error": "invalid_proof",
                         "error_description": "Missing jwt field",
                     },
                     "client_id": client_id,
                 }
+
+        try:
+            _mngr = self.upstream_get("context").session_manager
+            _session_info = _mngr.get_session_info_by_token(
+                request["access_token"], grant=True, handler_key="access_token"
+            )
+        except (KeyError, ValueError):
+            _resp = {
+                "error": "invalid_token",
+                "error_description": "Invalid Token",
+            }
+            return _resp
+
+        _resp = self.credentialReq(request, client_id, _session_info)
+
+        print("Response: ", _resp)
+
+        if "credential_response_encryption" in request:
             if (
-                request["proof"]["proof_type"] == "cwt"
-                and "cwt" not in request["proof"]
+                "jwk" not in request["credential_response_encryption"]
+                or "alg" not in request["credential_response_encryption"]
+                or "enc" not in request["credential_response_encryption"]
             ):
                 return {
                     "response_args": {
-                        "c_nonce": rndstr(),
-                        "c_nonce_expires_in": 86400,
-                        "error": "invalid_proof",
-                        "error_description": "Missing cwt field",
+                        "error": "invalid_credential_response_encryption",
+                        "error_description": "Missing fields",
                     },
                     "client_id": client_id,
                 }
+            else:
+                protected_header = {
+                    "alg": request["credential_response_encryption"]["alg"],
+                    "enc": request["credential_response_encryption"]["enc"],
+                }
 
-        req = request
+                try:
+                    public_key = JsonWebKey.import_key(
+                        request["credential_response_encryption"]["jwk"]
+                    )
+                    jwe = JsonWebEncryption()
+                    jwe_token = jwe.serialize_compact(
+                        protected_header, json.dumps(_resp), public_key
+                    )
+                except:
+                    return {
+                        "response_args": {
+                            "error": "invalid_credential_response_encryption",
+                            "error_description": "JWK not valid",
+                        },
+                        "client_id": client_id,
+                    }
 
-        if (
-            "credential_requests" not in request
-            and "format" in request
-            and "doctype" in request
-            and "proof" in request
-        ):
-            credential_json = {
-                "format": request["format"],
-                "doctype": request["doctype"],
-                "proof": request["proof"],
-            }
-
-            req = {"credential_requests": [credential_json]}
-            request.pop("format")
-            request.pop("doctype")
-            request.pop("proof")
-
-            request.update(req)
-
-        elif (
-            "credential_requests" not in request
-            and "format" in request
-            and "vct" in request
-            and "proof" in request
-        ):
-            credential_json = {
-                "format": request["format"],
-                "vct": request["vct"],
-                "proof": request["proof"],
-            }
-
-            req = {"credential_requests": [credential_json]}
-            request.pop("format")
-            request.pop("vct")
-            request.pop("proof")
-
-            request.update(req)
-
-        elif (
-            "credential_requests" not in request
-            and "format" not in request
-            and "credential_identifier" in request
-            and "proof" in request
-        ):
-            credential_json = {
-                "format": request["format"],
-                "credential_identifier": request["credential_identifier"],
-                "proof": request["proof"],
-            }
-
-            req = {"credential_requests": [credential_json]}
-            request.pop("format")
-            request.pop("credential_identifier")
-            request.pop("proof")
-
-            request.update(req)
-
-        elif "credential_requests" not in request:
-            return {
-                "response_args": {
-                    "c_nonce": rndstr(),
-                    "c_nonce_expires_in": 86400,
-                    "error": "invalid_credential_request",
-                    "error_description": "Missing or mismatched data",
-                },
-                "client_id": client_id,
-            }
-
-        _resp = self.credentialReq(request, client_id)
+                if "transaction_id" in _resp:
+                    return {
+                        "encrypted_response": jwe_token,
+                        "client_id": client_id,
+                        "transaction_id": _resp["transaction_id"],
+                    }
+                else:
+                    if "transaction_id" in request:
+                        _session_info["grant"].add_transaction(
+                            request["transaction_id"],
+                            {"encrypted_response": jwe_token, "client_id": client_id},
+                        )
+                    return {"encrypted_response": jwe_token, "client_id": client_id}
 
         # credentials, client_id = self.credentialReq(request)
 
-        logger.info("Response: ", _resp)
+        if "transaction_id" in request:
+            _session_info["grant"].add_transaction(
+                request["transaction_id"],
+                {"response_args": _resp, "client_id": client_id},
+            )
 
         return {"response_args": _resp, "client_id": client_id}
+
+    def process_deferred(self):
+        for transaction_id in list(self.deferred_requests):
+            self.deferred_requests[transaction_id]["request"][
+                "transaction_id"
+            ] = transaction_id
+            request = self.deferred_requests[transaction_id]["request"]
+            count = self.deferred_requests[transaction_id]["count"]
+            if count == 0:
+                del self.deferred_requests[transaction_id]
+                continue
+            else:
+                _resp = self.process_request(request)
+                self.deferred_requests[transaction_id]["count"] -= 1
