@@ -351,7 +351,13 @@ class Credential(Endpoint):
     import multicodec
 
     def pKfromJWK(self, jwt_encoded):
-        jwt_decoded = jwt.get_unverified_header(jwt_encoded)
+        try:
+            jwt_decoded = jwt.get_unverified_header(jwt_encoded)
+        except Exception as e:
+            return {
+                "error": "invalid_proof",
+                "error_description": f"JWT header parsing failed: {e}",
+            }
 
         if "jwk" in jwt_decoded:
             jwk = jwt_decoded["jwk"]
@@ -362,52 +368,80 @@ class Credential(Endpoint):
                     "error_description": "Credential Issuer only supports P-256 curves",
                 }
 
-            x_bytes = base64.urlsafe_b64decode(jwk["x"] + "=" * (4 - len(jwk["x"]) % 4))
-            y_bytes = base64.urlsafe_b64decode(jwk["y"] + "=" * (4 - len(jwk["y"]) % 4))
+            try:
+                x_bytes = base64.urlsafe_b64decode(jwk["x"] + "=" * (4 - len(jwk["x"]) % 4))
+                y_bytes = base64.urlsafe_b64decode(jwk["y"] + "=" * (4 - len(jwk["y"]) % 4))
 
-            public_numbers = ec.EllipticCurvePublicNumbers(
-                x=int.from_bytes(x_bytes, "big"),
-                y=int.from_bytes(y_bytes, "big"),
-                curve=ec.SECP256R1(),
-            )
+                public_numbers = ec.EllipticCurvePublicNumbers(
+                    x=int.from_bytes(x_bytes, "big"),
+                    y=int.from_bytes(y_bytes, "big"),
+                    curve=ec.SECP256R1(),
+                )
+            except Exception as e:
+                return {
+                    "error": "invalid_proof",
+                    "error_description": f"Invalid JWK EC coordinates: {e}",
+                }
 
         elif "kid" in jwt_decoded and jwt_decoded["kid"].startswith("did:key:"):
             did_key = jwt_decoded["kid"]
-            key_mb = did_key.split(":")[2].split("#")[0]
+            jwk = self.pKfromDIDKey(did_key)
+            if "error" in jwk:
+                return jwk
 
-            decoded = multibase.decode(key_mb)
-            # expect prefix: 0x12 0x01 for secp256r1 (P-256) multicodec
-            if not decoded.startswith(b"\x12\x01") or len(decoded) != 2 + 33:
+            if jwk.get("crv") != "P-256":
                 return {
                     "error": "invalid_proof",
-                    "error_description": "Unsupported multicodec or malformed DID key",
+                    "error_description": "Credential Issuer only supports P-256 curves",
                 }
 
-            x_bytes = decoded[2:2 + 32]
-            y_bytes = decoded[2 + 32:]
+            try:
+                x_bytes = base64.urlsafe_b64decode(jwk["x"] + "=" * (4 - len(jwk["x"]) % 4))
+                y_bytes = base64.urlsafe_b64decode(jwk["y"] + "=" * (4 - len(jwk["y"]) % 4))
 
-            # Recover EC point from compressed format
-            from cryptography.hazmat.primitives.asymmetric import ec
-            from cryptography.hazmat.backends import default_backend
+                public_numbers = ec.EllipticCurvePublicNumbers(
+                    x=int.from_bytes(x_bytes, "big"),
+                    y=int.from_bytes(y_bytes, "big"),
+                    curve=ec.SECP256R1(),
+                )
+            except Exception as e:
+                return {
+                    "error": "invalid_proof",
+                    "error_description": f"Invalid DID JWK EC coordinates: {e}",
+                }
 
-            public_key = ec.EllipticCurvePublicKey.from_encoded_point(
-                ec.SECP256R1(), decoded[2:]
-            )
         else:
             return {
                 "error": "invalid_proof",
                 "error_description": "No suitable key material found in JWT header",
             }
 
-        if 'public_key' not in locals():
-            public_key = public_numbers.public_key()
-
+        public_key = public_numbers.public_key()
         public_key_pem = public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-
         return base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
+
+    def pKfromDIDKey(self, did_key):
+        try:
+            url = f"https://dev.uniresolver.io/1.0/identifiers/{did_key}"
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            vm = data.get("didDocument", {}).get("verificationMethod", [])
+            for entry in vm:
+                if entry.get("id", "").startswith(did_key) and "publicKeyJwk" in entry:
+                    return entry["publicKeyJwk"]
+            return {
+                "error": "invalid_proof",
+                "error_description": "No valid publicKeyJwk found",
+            }
+        except Exception as e:
+            return {
+                "error": "invalid_proof",
+                "error_description": f"DID resolution failed: {e}",
+            }
 
     def pKfromCWT(self, cwt_encoded):
         decoded_cwt = cbor2.loads(base64.urlsafe_b64decode(cwt_encoded + "=="))
