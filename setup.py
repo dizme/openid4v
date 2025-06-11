@@ -61,6 +61,6 @@ setup(
         "cryptography>=39.0.0",
         "py-multibase>=1.0.3",
         "py-multicodec>=0.2.1",
-    ]
+    ],
     zip_safe=False,
 )
