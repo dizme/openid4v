@@ -343,44 +343,71 @@ class Credential(Endpoint):
             print("Invalid token", str(e))
 
     # gets the public key from a JWK
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    import base64
+    import jwt
+    import multibase
+    import multicodec
+
     def pKfromJWK(self, jwt_encoded):
         jwt_decoded = jwt.get_unverified_header(jwt_encoded)
-        jwk = jwt_decoded["jwk"]
 
-        if "crv" not in jwk or jwk["crv"] != "P-256":
-            _resp = {
+        if "jwk" in jwt_decoded:
+            jwk = jwt_decoded["jwk"]
+
+            if jwk.get("crv") != "P-256":
+                return {
+                    "error": "invalid_proof",
+                    "error_description": "Credential Issuer only supports P-256 curves",
+                }
+
+            x_bytes = base64.urlsafe_b64decode(jwk["x"] + "=" * (4 - len(jwk["x"]) % 4))
+            y_bytes = base64.urlsafe_b64decode(jwk["y"] + "=" * (4 - len(jwk["y"]) % 4))
+
+            public_numbers = ec.EllipticCurvePublicNumbers(
+                x=int.from_bytes(x_bytes, "big"),
+                y=int.from_bytes(y_bytes, "big"),
+                curve=ec.SECP256R1(),
+            )
+
+        elif "kid" in jwt_decoded and jwt_decoded["kid"].startswith("did:key:"):
+            did_key = jwt_decoded["kid"]
+            key_mb = did_key.split(":")[2].split("#")[0]
+
+            decoded = multibase.decode(key_mb)
+            # expect prefix: 0x12 0x01 for secp256r1 (P-256) multicodec
+            if not decoded.startswith(b"\x12\x01") or len(decoded) != 2 + 33:
+                return {
+                    "error": "invalid_proof",
+                    "error_description": "Unsupported multicodec or malformed DID key",
+                }
+
+            x_bytes = decoded[2:2 + 32]
+            y_bytes = decoded[2 + 32:]
+
+            # Recover EC point from compressed format
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.backends import default_backend
+
+            public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), decoded[2:]
+            )
+        else:
+            return {
                 "error": "invalid_proof",
-                "error_description": "Credential Issuer only supports P-256 curves",
+                "error_description": "No suitable key material found in JWT header",
             }
-            return _resp  # {"response_args": _resp, "client_id": client_id}
 
-        x = jwk["x"]
-        y = jwk["y"]
+        if 'public_key' not in locals():
+            public_key = public_numbers.public_key()
 
-        # Convert string coordinates to bytes
-        x_bytes = base64.urlsafe_b64decode(x + "=" * (4 - len(x) % 4))
-        y_bytes = base64.urlsafe_b64decode(y + "=" * (4 - len(y) % 4))
-
-        # Create a public key from the bytes
-        public_numbers = ec.EllipticCurvePublicNumbers(
-            x=int.from_bytes(x_bytes, "big"),
-            y=int.from_bytes(y_bytes, "big"),
-            curve=ec.SECP256R1(),
-        )
-
-        public_key = public_numbers.public_key()
-
-        # Serialize the public key to PEM format
         public_key_pem = public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
 
-        # Encode the public key in base64url format
-
-        device_key = base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
-
-        return device_key
+        return base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
 
     def pKfromCWT(self, cwt_encoded):
         decoded_cwt = cbor2.loads(base64.urlsafe_b64decode(cwt_encoded + "=="))
@@ -438,9 +465,12 @@ class Credential(Endpoint):
     def credentialReq(self, request, client_id, _session_info):
 
         formatter_request = {}
-
+        if "credential_identifier" in request:
+            credential_configuration_id = request["credential_identifier"]
+        if "credential_configuration_id" in request:
+            credential_configuration_id = request["credential_configuration_id"]
         formatter_request.update(
-            {"credential_configuration_id": request["credential_configuration_id"]}
+            {"credential_configuration_id": credential_configuration_id}
         )
 
         if "proof" in request and request["proof"]["proof_type"] == "jwt":
