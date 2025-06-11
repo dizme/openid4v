@@ -58,9 +58,9 @@ setup(
     install_requires=[
         "idpyoidc>=4.0.0",
         "Authlib>=1.5.1",
-        "multibase>=1.0.1",
-        "multicodec>=0.1.1",
-        "cryptography>=39.0.0"
-    ],
+        "cryptography>=39.0.0",
+        "py-multibase>=1.0.3",
+        "py-multicodec>=0.2.1",
+    ]
     zip_safe=False,
 )
