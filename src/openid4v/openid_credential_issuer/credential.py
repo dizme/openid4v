@@ -23,7 +23,10 @@ import json
 import jwt
 from jwt.algorithms import get_default_algorithms
 
+import base64
+from multiformats import multibase, multicodec
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicNumbers
 from cryptography.hazmat.primitives import serialization
 import base64
 import cbor2
@@ -413,11 +416,6 @@ class Credential(Endpoint):
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         return base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
-
-    import base64
-    from multiformats import multibase, multicodec
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicNumbers
 
     def pKfromDIDKey(self, did_key):
         try:
