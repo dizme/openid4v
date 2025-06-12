@@ -341,14 +341,6 @@ class Credential(Endpoint):
         except jwt.InvalidTokenError as e:
             print("Invalid token", str(e))
 
-    # gets the public key from a JWK
-    from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives import serialization
-    import base64
-    import jwt
-    import multibase
-    import multicodec
-
     def pKfromJWK(self, jwt_encoded):
         try:
             jwt_decoded = jwt.get_unverified_header(jwt_encoded)
