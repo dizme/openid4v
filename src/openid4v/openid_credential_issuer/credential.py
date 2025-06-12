@@ -423,24 +423,60 @@ class Credential(Endpoint):
         )
         return base64.urlsafe_b64encode(public_key_pem).decode("utf-8")
 
+    import base64
+    import multibase
+    import multicodec
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicNumbers
+
     def pKfromDIDKey(self, did_key):
         try:
-            url = f"https://dev.uniresolver.io/1.0/identifiers/{did_key}"
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            vm = data.get("didDocument", {}).get("verificationMethod", [])
-            for entry in vm:
-                if entry.get("id", "").startswith(did_key) and "publicKeyJwk" in entry:
-                    return entry["publicKeyJwk"]
+            if not did_key.startswith("did:key:"):
+                return {
+                    "error": "invalid_proof",
+                    "error_description": "Unsupported DID format",
+                }
+
+            method_specific_id = did_key.split(":")[2]
+            raw_bytes = multibase.decode(method_specific_id)
+
+            codec, key_bytes = multicodec.split(raw_bytes)
+
+            if codec.name != "p256-pub":
+                return {
+                    "error": "invalid_proof",
+                    "error_description": f"Unsupported key type: {codec.name}",
+                }
+
+            if len(key_bytes) != 65 or key_bytes[0] != 0x04:
+                return {
+                    "error": "invalid_proof",
+                    "error_description": "Expected uncompressed P-256 key (65 bytes)",
+                }
+
+            x = int.from_bytes(key_bytes[1:33], "big")
+            y = int.from_bytes(key_bytes[33:], "big")
+
+            public_numbers = EllipticCurvePublicNumbers(x, y, ec.SECP256R1())
+            public_key = public_numbers.public_key()
+
+            pub = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+
             return {
-                "error": "invalid_proof",
-                "error_description": "No valid publicKeyJwk found",
+                "kty": "EC",
+                "crv": "P-256",
+                "x": base64.urlsafe_b64encode(key_bytes[1:33]).rstrip(b"=").decode("utf-8"),
+                "y": base64.urlsafe_b64encode(key_bytes[33:]).rstrip(b"=").decode("utf-8"),
             }
+
         except Exception as e:
             return {
                 "error": "invalid_proof",
-                "error_description": f"DID resolution failed: {e}",
+                "error_description": f"DID parsing failed: {e}",
             }
 
     def pKfromCWT(self, cwt_encoded):
